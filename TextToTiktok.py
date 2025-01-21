@@ -51,25 +51,40 @@ def text_to_speech_with_voice(text: str, voice_index: int = 0, output_file: str 
         raise
 
 
-def format_timestamp(seconds: float) -> str:
-    """Convert seconds into SRT-compatible timestamp format (HH:MM:SS,ms)."""
+def format_timestamp(seconds: float, for_ass: bool = False) -> str:
+    """
+    Convert seconds into timestamp format.
+    - For SRT: HH:MM:SS,ms
+    - For ASS: H:MM:SS.ms
+    """
     td = timedelta(seconds=seconds)
     total_seconds = int(td.total_seconds())
     hours = total_seconds // 3600
     minutes = (total_seconds % 3600) // 60
     seconds = total_seconds % 60
     milliseconds = int((td.total_seconds() - total_seconds) * 1000)
-    return f"{hours:02}:{minutes:02}:{seconds:02},{milliseconds:03}"
+
+    if for_ass:
+        # ASS format: H:MM:SS.ms
+        return f"{hours}:{minutes:02}:{seconds:02}.{milliseconds:02}"
+    else:
+        # SRT format: HH:MM:SS,ms
+        return f"{hours:02}:{minutes:02}:{seconds:02},{milliseconds:03}"
 
 
-def transcribe_to_srt(audio_path: str, srt_path: str, model_name: str = "base", offset: float = -0.05) -> None:
-    """Convert an audio file to subtitles with one word at a time centered and save them as an SRT file."""
+def transcribe_to_srt(audio_path: str, srt_path: str, model_name: str = "base", offset: float = -0.00) -> None:
+    """Convert audio to subtitles with word-level or segment-level timestamps."""
     logger.info("Transcribing audio to subtitles...")
     try:
         logger.info("Loading Whisper model...")
         model = whisper.load_model(model_name)
-        logger.info("Transcribing audio...")
-        result = model.transcribe(audio_path)
+
+        logger.info("Transcribing audio with word-level timestamps...")
+        result = model.transcribe(audio_path, word_timestamps=True)
+
+        if not result.get("segments"):
+            logger.error("No segments found in transcription result.")
+            return
 
         logger.info(f"Saving subtitles to {srt_path}...")
         with open(srt_path, "w", encoding="utf-8") as srt_file:
@@ -77,25 +92,33 @@ def transcribe_to_srt(audio_path: str, srt_path: str, model_name: str = "base", 
             for segment in result["segments"]:
                 start_time = segment["start"]
                 end_time = segment["end"]
-                text = segment["text"].strip()
-                words = text.split()
 
-                # Calculate time per word
-                segment_duration = end_time - start_time
-                time_per_word = segment_duration / len(words)
-
-                for i, word in enumerate(words):
-                    # Adjust word timings with offset
-                    word_start = max(0, start_time + i * time_per_word + offset)  # Avoid negative times
-                    word_end = word_start + time_per_word
-
-                    # Format and write the SRT entry for the word
+                # Use segment-level text if no word-level timestamps
+                if not segment.get("words"):
+                    logger.warning(f"Skipping word-level timestamps for segment: {segment.get('text')}")
                     srt_file.write(
                         f"{index}\n"
-                        f"{format_timestamp(word_start)} --> {format_timestamp(word_end)}\n"
-                        f"{word}\n\n"
+                        f"{format_timestamp(start_time)} --> {format_timestamp(end_time)}\n"
+                        f"{segment['text'].strip()}\n\n"
                     )
                     index += 1
+                    continue
+
+                # Process word-level timestamps
+                for word_data in segment["words"]:
+                    if all(key in word_data for key in ["word", "start", "end"]):
+                        word_start = max(0, word_data["start"] + offset)
+                        word_end = max(0, word_data["end"] + offset)
+                        word_text = word_data["word"].strip()
+
+                        srt_file.write(
+                            f"{index}\n"
+                            f"{format_timestamp(word_start)} --> {format_timestamp(word_end)}\n"
+                            f"{word_text}\n\n"
+                        )
+                        index += 1
+                    else:
+                        logger.warning(f"Skipping invalid word data: {word_data}")
 
         logger.info("Subtitles successfully saved.")
     except Exception as e:
@@ -218,32 +241,152 @@ def prepare_video_clips(video_folder: str, audio_duration: float, output_video: 
             os.remove(temp_file)
             logger.info(f"Temporary file {temp_file} deleted.")
 
-def combine_audio_video_subtitles(audio_path: str, srt_path: str, video_path: str, output_file: str) -> bool:
-    """Combines audio, video, and subtitles into a single video file."""
+def generate_ass_from_srt(srt_path: str, ass_path: str, format_ass_path: str) -> None:
+    """
+    Converts an SRT file to an ASS file with enhanced styling and positioning.
+    Ensures words appear one at a time without overlap.
+    """
+    try:
+        logger.info("Converting SRT to ASS...")
+
+        # Load the format.ass template
+        with open(format_ass_path, "r", encoding="utf-8") as format_file:
+            format_template = format_file.read()
+
+        with open(ass_path, "w", encoding="utf-8") as ass_file:
+            # Write the format.ass template as the header
+            ass_file.write(format_template)
+
+            # Start the [Events] section
+            ass_file.write("\n[Events]\n")
+            ass_file.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+
+            with open(srt_path, "r", encoding="utf-8") as srt_file:
+                start_time = 0.0
+                end_time = 0.0
+                for line in srt_file:
+                    if "-->" in line:
+                        # Parse SRT time
+                        times = line.strip().split(" --> ")
+                        start_time = float(times[0].split(":")[-1].replace(",", "."))
+                        end_time = float(times[1].split(":")[-1].replace(",", "."))
+                    elif line.strip().isdigit() or not line.strip():
+                        continue
+                    else:
+                        # Process text and ensure each word is sequential
+                        words = line.strip().split()
+                        word_count = len(words)
+                        duration = (end_time - start_time) / word_count
+                        for i, word in enumerate(words):
+                            word_start = start_time + (i * duration)
+                            word_end = word_start + duration
+                            # Write each word as a separate line in ASS format
+                            ass_file.write(
+                                f"Dialogue: 0,{format_timestamp(word_start, for_ass=True)},"
+                                f"{format_timestamp(word_end, for_ass=True)},Default,,0,0,0,,{word}\n"
+                            )
+        logger.info(f"ASS file generated at {ass_path}")
+    except Exception as e:
+        logger.error(f"Error generating ASS file: {e}")
+        raise
+
+
+        logger.info(f"ASS file generated successfully at {ass_output}")
+    except Exception as e:
+        logger.error(f"Error generating ASS file: {e}")
+        raise
+
+def generate_fixed_ass(srt_path: str, format_ass_path: str, ass_output: str) -> None:
+    """
+    Converts an SRT file into a properly formatted ASS file using a template,
+    ensuring no overlapping subtitles and one word at a time.
+    """
+    try:
+        logger.info("Converting SRT to fixed ASS format...")
+
+        # Load the format.ass template
+        with open(format_ass_path, "r", encoding="utf-8") as format_file:
+            format_template = format_file.read()
+
+        with open(ass_output, "w", encoding="utf-8") as ass_file:
+            # Write the format template as the header
+            ass_file.write(format_template)
+
+            # Ensure only one [Events] section
+            if "[Events]" not in format_template:
+                ass_file.write("\n[Events]\n")
+                ass_file.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+
+            # Process the SRT file and add each word as a separate dialogue
+            with open(srt_path, "r", encoding="utf-8") as srt_file:
+                for line in srt_file:
+                    if "-->" in line:
+                        # Parse time intervals
+                        times = line.strip().split(" --> ")
+                        start_time = float(times[0].replace(",", ".").split(":")[-1]) + \
+                                     int(times[0].split(":")[-2]) * 60 + \
+                                     int(times[0].split(":")[-3]) * 3600
+                        end_time = float(times[1].replace(",", ".").split(":")[-1]) + \
+                                   int(times[1].split(":")[-2]) * 60 + \
+                                   int(times[1].split(":")[-3]) * 3600
+                    elif line.strip().isdigit() or not line.strip():
+                        continue
+                    else:
+                        # Split line into individual words
+                        words = line.strip().split()
+                        duration_per_word = (end_time - start_time) / len(words)
+
+                        # Write each word as a separate line in ASS format
+                        for i, word in enumerate(words):
+                            word_start = start_time + i * duration_per_word
+                            word_end = word_start + duration_per_word
+                            ass_file.write(
+                                f"Dialogue: 0,{format_timestamp(word_start, for_ass=True)},"
+                                f"{format_timestamp(word_end, for_ass=True)},Default,,0,0,0,,{word}\n"
+                            )
+
+        logger.info(f"Fixed ASS file generated successfully at {ass_output}")
+    except Exception as e:
+        logger.error(f"Error generating fixed ASS file: {e}")
+        raise
+
+
+
+def combine_audio_video_subtitles(
+    audio_path: str, subtitle_path: str, video_path: str, output_file: str, use_ass: bool = False
+) -> bool:
+    """
+    Combines audio, video, and subtitles into a single video file.
+    """
     logger.info("Combining audio, video, and subtitles...")
-    if not os.path.exists(video_path):
-        logger.error(f"Video file {video_path} does not exist!")
+
+    # Check subtitle file
+    if not os.path.exists(subtitle_path) or os.stat(subtitle_path).st_size == 0:
+        logger.error(f"Subtitle file {subtitle_path} is missing or empty.")
         return False
 
+    subtitle_format = "ass" if use_ass else "srt"
+    subtitle_option = (
+        f"subtitles={subtitle_path}:force_style='FontSize=24,Alignment=6,MarginV=120,MarginL=50,MarginR=50'"
+        if subtitle_format == "srt" else f"ass={subtitle_path}"
+    )
+
     command = [
-    "ffmpeg", "-y", "-loglevel", "warning", "-hide_banner",
-    "-i", video_path, "-i", audio_path,
-    "-vf", f"subtitles={srt_path}:force_style='Alignment=2'",  # Center the text vertically
-    "-c:v", "libx264", "-c:a", "aac",
-    "-strict", "experimental", output_file
-]
-
-
+        "ffmpeg", "-y", "-loglevel", "warning", "-hide_banner",
+        "-i", video_path, "-i", audio_path,
+        "-vf", subtitle_option,
+        "-c:v", "libx264", "-c:a", "aac", "-strict", "experimental",
+        output_file,
+    ]
 
     try:
-        logger.info(f"Running FFmpeg command to combine media...")
+        logger.info(f"Running FFmpeg command: {' '.join(command)}")
         subprocess.run(command, check=True)
         logger.info(f"Final video created successfully and saved as {output_file}")
         return True
-    except Exception as e:
+    except subprocess.CalledProcessError as e:
         logger.error(f"Error combining media: {e}")
         return False
-
 
 def main():
     """Main function to orchestrate the entire process."""
@@ -274,6 +417,7 @@ def main():
 
     audio_file = "output.mp3"
     srt_file = "output.srt"
+    ass_file = "output.ass"
     prepared_video = "prepared_video.mp4"
     final_video = "final_output.mp4"
 
@@ -302,13 +446,25 @@ def main():
         logger.error(f"Error during video preparation: {e}")
         return
 
+    # Toggle for ASS subtitles
+    use_ass = input("Use ASS for subtitles (yes/no)? ").strip().lower() == "yes"
+    subtitle_path = ass_file if use_ass else srt_file
+
+    # Generate ASS file using the template
+    if use_ass:
+        try:
+            format_ass_path = "format.ass"  # Path to the format template
+            generate_fixed_ass(srt_file, format_ass_path, ass_file)
+        except Exception as e:
+            logger.error(f"Error generating ASS subtitles: {e}")
+            return
+
     # Combine audio, video, and subtitles
     try:
-        combine_audio_video_subtitles(audio_file, srt_file, prepared_video, final_video)
+        combine_audio_video_subtitles(audio_file, subtitle_path, prepared_video, final_video, use_ass=use_ass)
         logger.info(f"Process complete! Your final video is saved as {final_video}")
     except Exception as e:
         logger.error(f"Error during final video creation: {e}")
-
 
 if __name__ == "__main__":
     main()

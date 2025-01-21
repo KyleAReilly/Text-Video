@@ -1,0 +1,16 @@
+[Script Info]
+Title: Video Subtitles
+ScriptType: v4.00+
+Collisions: Normal
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BorderStyle, Encoding, Alignment
+Style: Default,Segoe UI,45,&H00FFFFFF,&H00000000,&H00000000,1,1,5
+
+
+[Events]
+Format: Layer, Start, End, Style, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:05.00,Default,0,0,0,,{\an5\pos(540,960)}LISTEN IN
