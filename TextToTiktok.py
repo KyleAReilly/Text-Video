@@ -8,10 +8,94 @@ import logging  # For improved logging
 import shutil  # To check for dependency availability
 from typing import Optional
 import tempfile  # For managing temporary files
+import configparser # used for our config.ini values
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# Default configuration values
+DEFAULT_CONFIG = {
+    "default_text_file": "text.txt",
+    "video_folder": "videos",
+    "voice_index": "0",
+    "rate": "160",
+    "output_audio_file": "output.mp3",
+    "output_video_file": "final_output.mp4",
+    "use_ass_subtitles": "no",
+    "subtitle_format": "output.srt"
+}
+
+def load_config(config_file: str) -> dict:
+    """
+    Load and validate the configuration file. Applies defaults for invalid or missing values.
+
+    Args:
+        config_file (str): Path to the configuration file.
+
+    Returns:
+        dict: A dictionary containing the validated configuration.
+    """
+    config = configparser.ConfigParser()
+    if not os.path.exists(config_file):
+        logger.error(f"Configuration file '{config_file}' not found. Exiting.")
+        raise FileNotFoundError(f"Configuration file '{config_file}' is missing.")
+
+    config.read(config_file)
+
+    # Check if the 'General' section exists
+    if "General" not in config:
+        logger.error("Missing 'General' section in the configuration file.")
+        raise KeyError("Configuration file must contain a [General] section.")
+
+    general_config = config["General"]
+    validated_config = DEFAULT_CONFIG.copy()
+
+    # Validate and apply configuration options
+    try:
+        validated_config["default_text_file"] = general_config.get("default_text_file", DEFAULT_CONFIG["default_text_file"])
+        if not os.path.exists(validated_config["default_text_file"]):
+            logger.warning(f"Text file '{validated_config['default_text_file']}' not found. Using default.")
+
+        validated_config["video_folder"] = general_config.get("video_folder", DEFAULT_CONFIG["video_folder"])
+        if not os.path.isdir(validated_config["video_folder"]):
+            logger.warning(f"Video folder '{validated_config['video_folder']}' not found. Using default.")
+
+        validated_config["voice_index"] = general_config.get("voice_index", DEFAULT_CONFIG["voice_index"])
+        if not validated_config["voice_index"].isdigit():
+            logger.warning(f"Invalid voice index '{validated_config['voice_index']}'. Using default.")
+            validated_config["voice_index"] = DEFAULT_CONFIG["voice_index"]
+
+        validated_config["rate"] = general_config.get("rate", DEFAULT_CONFIG["rate"])
+        if not validated_config["rate"].isdigit():
+            logger.warning(f"Invalid TTS rate '{validated_config['rate']}'. Using default.")
+            validated_config["rate"] = DEFAULT_CONFIG["rate"]
+
+        validated_config["use_ass_subtitles"] = general_config.get("use_ass_subtitles", DEFAULT_CONFIG["use_ass_subtitles"]).strip().lower()
+        if validated_config["use_ass_subtitles"] not in ["yes", "no"]:
+            logger.warning(f"Invalid value for 'use_ass_subtitles': '{validated_config['use_ass_subtitles']}'. Using default.")
+            validated_config["use_ass_subtitles"] = DEFAULT_CONFIG["use_ass_subtitles"]
+
+        validated_config["subtitle_format"] = general_config.get("subtitle_format", DEFAULT_CONFIG["subtitle_format"])
+
+        # Validate subtitle_font_size
+        subtitle_font_size_str = general_config.get("subtitle_font_size", None)
+        if subtitle_font_size_str:
+            try:
+                validated_config["subtitle_font_size"] = int(subtitle_font_size_str.strip())
+            except ValueError:
+                logger.warning(f"Invalid 'subtitle_font_size': '{subtitle_font_size_str}'. Using default: {DEFAULT_CONFIG['subtitle_font_size']}.")
+                validated_config["subtitle_font_size"] = int(DEFAULT_CONFIG["subtitle_font_size"])
+        else:
+            logger.warning(f"'subtitle_font_size' not found in configuration. Using default: {DEFAULT_CONFIG['subtitle_font_size']}.")
+            validated_config["subtitle_font_size"] = int(DEFAULT_CONFIG["subtitle_font_size"])
+
+    except Exception as e:
+        logger.error(f"Unexpected error while parsing configuration: {e}")
+        raise
+
+    return validated_config
+
 
 def check_dependencies():
     """Ensure all required dependencies are installed."""
@@ -30,8 +114,13 @@ def list_voices():
         print(f"{i}: {voice.name} ({voice.languages})")
 
 
-def text_to_speech_with_voice(text: str, voice_index: int = 0, output_file: str = "output.mp3") -> None:
-    """Converts text to speech using a specific voice and saves to a file."""
+def text_to_speech_with_voice(
+    text: str, tts_rate: int, voice_index: int = 0, output_file: str = "output.mp3"
+) -> None:
+    """
+    Converts text to speech using a specific voice and saves to a file.
+    Allows customization of the speech rate.
+    """
     logger.info("Converting text to speech...")
     engine = pyttsx3.init()
     voices = engine.getProperty('voices')
@@ -42,6 +131,10 @@ def text_to_speech_with_voice(text: str, voice_index: int = 0, output_file: str 
     else:
         logger.warning("Invalid voice index. Using default voice.")
 
+    # Set the speech rate
+    logger.info(f"Setting TTS rate to {tts_rate} words per minute.")
+    engine.setProperty('rate', tts_rate)
+
     try:
         engine.save_to_file(text, output_file)
         engine.runAndWait()
@@ -49,6 +142,7 @@ def text_to_speech_with_voice(text: str, voice_index: int = 0, output_file: str 
     except Exception as e:
         logger.error(f"Error during text-to-speech conversion: {e}")
         raise
+
 
 
 def format_timestamp(seconds: float, for_ass: bool = False) -> str:
@@ -351,9 +445,8 @@ def generate_fixed_ass(srt_path: str, format_ass_path: str, ass_output: str) -> 
         raise
 
 
-
 def combine_audio_video_subtitles(
-    audio_path: str, subtitle_path: str, video_path: str, output_file: str, use_ass: bool = False
+        audio_path: str, subtitle_path: str, video_path: str, output_file: str, use_ass: bool, subtitle_font_size: int
 ) -> bool:
     """
     Combines audio, video, and subtitles into a single video file.
@@ -365,12 +458,15 @@ def combine_audio_video_subtitles(
         logger.error(f"Subtitle file {subtitle_path} is missing or empty.")
         return False
 
+    # Determine subtitle format and options
     subtitle_format = "ass" if use_ass else "srt"
     subtitle_option = (
-        f"subtitles={subtitle_path}:force_style='FontSize=24,Alignment=6,MarginV=120,MarginL=50,MarginR=50'"
+        f"subtitles={subtitle_path}:force_style='FontSize={subtitle_font_size},Alignment=6,MarginV=120,MarginL=50,MarginR=50'"
         if subtitle_format == "srt" else f"ass={subtitle_path}"
     )
+    logger.debug(f"Subtitle option: {subtitle_option}")
 
+    # Construct FFmpeg command
     command = [
         "ffmpeg", "-y", "-loglevel", "warning", "-hide_banner",
         "-i", video_path, "-i", audio_path,
@@ -379,6 +475,7 @@ def combine_audio_video_subtitles(
         output_file,
     ]
 
+    # Execute FFmpeg command
     try:
         logger.info(f"Running FFmpeg command: {' '.join(command)}")
         subprocess.run(command, check=True)
@@ -388,51 +485,60 @@ def combine_audio_video_subtitles(
         logger.error(f"Error combining media: {e}")
         return False
 
+
+
 def main():
     """Main function to orchestrate the entire process."""
+    # Check dependencies
     check_dependencies()
 
-    # Default configuration for testing
-    DEFAULT_FILE_PATH = r"C:\Users\Cropt\Downloads\owo.txt"
-    DEFAULT_VIDEO_FOLDER = r"E:\Content\VideoOverflow\videotest"
-    DEFAULT_VOICE_INDEX = 0
+    # Load and validate configuration
+    CONFIG_FILE = "config.ini"
+    config = load_config(CONFIG_FILE)
 
     logger.info("Welcome to the Text-to-Subtitle-Video Tool!")
-    list_voices()
+    logger.info("Loaded configuration:")
+    for key, value in config.items():
+        logger.info(f"  {key}: {value}")
 
-    # Prompt for inputs with defaults
-    file_path = input(f"Enter the path to the .txt file [{DEFAULT_FILE_PATH}]: ").strip() or DEFAULT_FILE_PATH
-    video_folder = input(f"Enter the path to the folder with videos [{DEFAULT_VIDEO_FOLDER}]: ").strip() or DEFAULT_VIDEO_FOLDER
-    voice_input = input(f"Choose a voice index [{DEFAULT_VOICE_INDEX}]: ").strip()
-    voice_choice = int(voice_input) if voice_input.isdigit() else DEFAULT_VOICE_INDEX
+    # Extract validated configuration values
+    file_path = config["default_text_file"]
+    video_folder = config["video_folder"]
+    voice_index = int(config["voice_index"])
+    tts_rate = int(config["rate"])
+    audio_file = config["output_audio_file"]
+    final_video = config["output_video_file"]
+    use_ass = config["use_ass_subtitles"] == "yes"
+    subtitle_path = config["subtitle_format"]
+    subtitle_font_size = config["subtitle_font_size"]  # Already validated and parsed as int in load_config
+    srt_file = "output.srt"
+    ass_file = "output.ass"
+    prepared_video = "prepared_video.mp4"
+    format_ass_path = config.get("ass_template_path", "format.ass")
+    model_name = config.get("model_name", "base")
+    whisper_offset = float(config.get("whisper_offset", 0.0))
 
     # Validate paths
     if not os.path.exists(file_path):
         logger.error(f"The file {file_path} does not exist.")
         return
 
-    if not os.path.exists(video_folder):
+    if not os.path.isdir(video_folder):
         logger.error(f"The folder {video_folder} does not exist.")
         return
-
-    audio_file = "output.mp3"
-    srt_file = "output.srt"
-    ass_file = "output.ass"
-    prepared_video = "prepared_video.mp4"
-    final_video = "final_output.mp4"
 
     # Convert text to speech
     try:
         with open(file_path, "r", encoding="utf-8") as file:
             text = file.read()
-        text_to_speech_with_voice(text, voice_choice, audio_file)
+        text_to_speech_with_voice(text, tts_rate, voice_index, audio_file)
     except Exception as e:
         logger.error(f"Error during text-to-speech conversion: {e}")
         return
 
     # Generate subtitles
     try:
-        transcribe_to_srt(audio_file, srt_file)
+        transcribe_to_srt(audio_file, srt_file, model_name, whisper_offset)
     except Exception as e:
         logger.error(f"Error during subtitle generation: {e}")
         return
@@ -446,25 +552,24 @@ def main():
         logger.error(f"Error during video preparation: {e}")
         return
 
-    # Toggle for ASS subtitles
-    use_ass = input("Use ASS for subtitles (yes/no)? ").strip().lower() == "yes"
-    subtitle_path = ass_file if use_ass else srt_file
-
-    # Generate ASS file using the template
+    # Generate ASS file if required
     if use_ass:
         try:
-            format_ass_path = "format.ass"  # Path to the format template
             generate_fixed_ass(srt_file, format_ass_path, ass_file)
+            subtitle_path = ass_file  # Update to use the ASS file
         except Exception as e:
             logger.error(f"Error generating ASS subtitles: {e}")
             return
 
     # Combine audio, video, and subtitles
     try:
-        combine_audio_video_subtitles(audio_file, subtitle_path, prepared_video, final_video, use_ass=use_ass)
+        combine_audio_video_subtitles(
+            audio_file, subtitle_path, prepared_video, final_video, use_ass, subtitle_font_size
+        )
         logger.info(f"Process complete! Your final video is saved as {final_video}")
     except Exception as e:
         logger.error(f"Error during final video creation: {e}")
+
 
 if __name__ == "__main__":
     main()
